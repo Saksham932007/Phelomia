@@ -1,0 +1,146 @@
+# Production deployment configuration for Phelomia
+# Docker Compose setup with optimized services
+
+version: '3.8'
+
+services:
+  phelomia-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    container_name: phelomia-app
+    ports:
+      - "7860:7860"
+    environment:
+      - PHELOMIA_DEVICE=cpu
+      - PHELOMIA_THEME=carbon
+      - PHELOMIA_ENABLE_CHAT=true
+      - PHELOMIA_DEBUG=false
+      - PHELOMIA_LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+      - ./results:/app/results
+      - ./data:/app/data
+      - phelomia_cache:/app/.cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+
+  phelomia-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    container_name: phelomia-gpu
+    ports:
+      - "7861:7860"
+    environment:
+      - PHELOMIA_DEVICE=cuda
+      - PHELOMIA_THEME=carbon
+      - PHELOMIA_ENABLE_CHAT=true
+      - PHELOMIA_DEBUG=false
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./logs:/app/logs
+      - ./results:/app/results
+      - ./data:/app/data
+      - phelomia_cache:/app/.cache
+    runtime: nvidia
+    restart: unless-stopped
+    profiles: ["gpu"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  redis:
+    image: redis:7-alpine
+    container_name: phelomia-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  nginx:
+    image: nginx:alpine
+    container_name: phelomia-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - phelomia-app
+    restart: unless-stopped
+    profiles: ["production"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: phelomia-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    profiles: ["monitoring"]
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: phelomia-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    profiles: ["monitoring"]
+
+volumes:
+  phelomia_cache:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  default:
+    name: phelomia-network
+    driver: bridge
